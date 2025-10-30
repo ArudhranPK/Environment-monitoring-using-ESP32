@@ -1,0 +1,122 @@
+#include <Arduino.h>
+
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BMP280.h>
+#include <DHT.h>
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+
+#include <time.h>
+
+//  Pinouts
+#define DHTPIN 25
+#define I2C_SDA 26
+#define I2C_SCL 27
+
+//  Constants
+#define DHTTYPE DHT11
+#define Publish_TOPIC "envMonitoring/pub"
+#define THINGNAME "ESP32"
+
+const char WIFI_SSID[] = "Arudhran";
+const char WIFI_PASSWORD[] = "12345678";
+const char AWS_IOT_ENDPOINT[] = "amnzd0jk1xhak-ats.iot.us-east-1.amazonaws.com";
+
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 19800;      // e.g., 0 for UTC
+const int   daylightOffset_sec = 0; // e.g., 3600 for DST
+struct tm timeinfo;
+
+Adafruit_BMP280 bmp;
+DHT dht(DHTPIN, DHTTYPE);
+
+WiFiClientSecure net = WiFiClientSecure();
+PubSubClient client(net);
+
+float temperature;  //  in °C
+float pressure;     //  in hpa hectopascal
+float humidity;     //  in % (relative humidity)
+
+ char timeString[50];
+
+// Amazon Root CA 1
+static const char AWS_CERT_CA[] PROGMEM = R"EOF(
+-----BEGIN CERTIFICATE-----
+MIIDQTCCAimgAwIBAgITBmyfz5m/jAo54vB4ikPmljZbyjANBgkqhkiG9w0BAQsF
+ADA5MQswCQYDVQQGEwJVUzEPMA0GA1UEChMGQW1hem9uMRkwFwYDVQQDExBBbWF6
+b24gUm9vdCBDQSAxMB4XDTE1MDUyNjAwMDAwMFoXDTM4MDExNzAwMDAwMFowOTEL
+MAkGA1UEBhMCVVMxDzANBgNVBAoTBkFtYXpvbjEZMBcGA1UEAxMQQW1hem9uIFJv
+b3QgQ0EgMTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALJ4gHHKeNXj
+ca9HgFB0fW7Y14h29Jlo91ghYPl0hAEvrAIthtOgQ3pOsqTQNroBvo3bSMgHFzZM
+9O6II8c+6zf1tRn4SWiw3te5djgdYZ6k/oI2peVKVuRF4fn9tBb6dNqcmzU5L/qw
+IFAGbHrQgLKm+a/sRxmPUDgH3KKHOVj4utWp+UhnMJbulHheb4mjUcAwhmahRWa6
+VOujw5H5SNz/0egwLX0tdHA114gk957EWW67c4cX8jJGKLhD+rcdqsq08p8kDi1L
+93FcXmn/6pUCyziKrlA4b9v7LWIbxcceVOF34GfID5yHI9Y/QCB/IIDEgEw+OyQm
+jgSubJrIqg0CAwEAAaNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMC
+AYYwHQYDVR0OBBYEFIQYzIU07LwMlJQuCFmcx7IQTgoIMA0GCSqGSIb3DQEBCwUA
+A4IBAQCY8jdaQZChGsV2USggNiMOruYou6r4lK5IpDB/G/wkjUu0yKGX9rbxenDI
+U5PMCCjjmCXPI6T53iHTfIUJrU6adTrCC2qJeHZERxhlbI1Bjjt/msv0tadQ1wUs
+N+gDS63pYaACbvXy8MWy7Vu33PqUXHeeE6V/Uq2V8viTO96LXFvKWlJbYK8U90vv
+o/ufQJVtMVT8QtPHRh8jrdkPSHCa2XV4cdFyQzR1bldZwgJcJmApzyMZFo6IQ6XU
+5MsI+yMRQ+hDKXJioaldXgjUkK642M4UwtBV8ob2xJNDd2ZhwLnoQdeXeGADbkpy
+rqXRfboQnoZsG4q5WTP468SQvvG5
+-----END CERTIFICATE-----
+)EOF";
+
+// Device Certificate
+static const char AWS_CERT_CRT[] PROGMEM = R"KEY(
+-----BEGIN CERTIFICATE-----
+MIIDWTCCAkGgAwIBAgIUZLZnO/yAGDXriR/qq1XnDEuGmC0wDQYJKoZIhvcNAQEL
+BQAwTTFLMEkGA1UECwxCQW1hem9uIFdlYiBTZXJ2aWNlcyBPPUFtYXpvbi5jb20g
+SW5jLiBMPVNlYXR0bGUgU1Q9V2FzaGluZ3RvbiBDPVVTMB4XDTI1MTAxMjEzNTIz
+OVoXDTQ5MTIzMTIzNTk1OVowHjEcMBoGA1UEAwwTQVdTIElvVCBDZXJ0aWZpY2F0
+ZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAL5DysRfnVD/5ntPZQdE
+bZuNCvPYGxhXBens3ktrnBm//cjGcT9XYDMjm1ZgqlcpDSQjI55LkqAxbFqLbQWJ
+yoY8mMNSWafVAsaSTpWpbEHGne1jWig4qPtaSzND3/ue9sGcinb0CyBOifRu+5fb
+RLKuc0xhRKdNbsNWT28WVva2t4UP54LQQombdaLzRKGzztRnflS6kiGJ/K69HqTx
+ecs3b1Xb/tqMhmt/gFagdujieCymAOjCkDe81gkOnjSygQHZHnaHLgPpWFk38XP6
+NPlQMuLcQqaElXNRtvgNUZQx5q7HeFu94gHrDnc96jk4EhkfMz1Mi2UmSkiPUOUK
+pTECAwEAAaNgMF4wHwYDVR0jBBgwFoAUxwNH7mor2z9FuRrETL+ZdKqcYqswHQYD
+VR0OBBYEFDH2m5gAjd+B5xY44POJt7VKtpbhMAwGA1UdEwEB/wQCMAAwDgYDVR0P
+AQH/BAQDAgeAMA0GCSqGSIb3DQEBCwUAA4IBAQCe4o9AFr2ML8AXQ1LRXd9TxsOw
+LhExNqSZXBf6V61oV6/S24y9QKEg7112P3/MLpIsQw5wqS97GWzNQ8cOVp10mq2a
+HIwWreYPjgsTe5H4c7o4o/OZhxNBm4O7cRiAmUPLkaeJBbqxu9KZGsqzoOVTPU46
+ltpqumSNaPFxLfm1b+R/1FKQu9b3WXGP8BTlr1V5dJDCTaRqOP94Rwnd4hXnKmz8
+QNXtoAYGIkVnD5s0jhxTfOYmLCk+7KjlCOwWaTLCQjjefDQ0rpAG67KwlfDrzBW0
+TSIba9vd/39UIfGKlCVbO152zG87/PFbWKCGJVGCFrz2jneSobOX2tIIU4ln
+-----END CERTIFICATE-----
+)KEY";
+
+// Device Private Key
+static const char AWS_CERT_PRIVATE[] PROGMEM = R"KEY(
+-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEAvkPKxF+dUP/me09lB0Rtm40K89gbGFcF6ezeS2ucGb/9yMZx
+P1dgMyObVmCqVykNJCMjnkuSoDFsWottBYnKhjyYw1JZp9UCxpJOlalsQcad7WNa
+KDio+1pLM0Pf+572wZyKdvQLIE6J9G77l9tEsq5zTGFEp01uw1ZPbxZW9ra3hQ/n
+gtBCiZt1ovNEobPO1Gd+VLqSIYn8rr0epPF5yzdvVdv+2oyGa3+AVqB26OJ4LKYA
+6MKQN7zWCQ6eNLKBAdkedocuA+lYWTfxc/o0+VAy4txCpoSVc1G2+A1RlDHmrsd4
+W73iAesOdz3qOTgSGR8zPUyLZSZKSI9Q5QqlMQIDAQABAoIBAQCdDjTImOyxOiu1
+SjppH1Ei//A0jQUAuIUHLiHpO/DlSJhjLXu5/5RHYnMNgEncHOTeGauDNXrZhTKe
+I01hLvbgjBDF2qprYegipg78d5gHS759gG+hl/PVWBmPPc4cVIH4HBIoUxcEGhDC
+lwJTvgodPOer+vbC66Ys1IhJeLVcfNbhEHEuZmuNipDwUT3c0cQPItK4Lrxv625z
+oxfSha6ePuvIfjIiwhpKGbzXoevlVzFY+Q5HVANFUxa6GE2SV4P20zTKIJQFRTho
+YzfBFXLcrnqaHJiSBqiTlwyWssARQgDYGz+f08aJ2QfBlK2yObWE7xOPjc6knDL3
+chjOE9QJAoGBAODAAoVT5tzFQ1kFPHfRtzQAaep9spQ1+gEPlvcGX0izMljfd2sR
+gOdVK3ALUKEZJ6FvhP9CsFrSqtj38k0i30VITjJPD1FRkYH2Hpf88GPMiWuiD7VH
+pF8Dp66o5yV7piSZ7A3PEm+zXxroL1ZPFPirB6UtDjmCjH1HQRr54uMfAoGBANi4
+R1d+euIP1yOw8dZose/NxxxxZ/T+AkzsqfKhbn8ZVmyBV9qyZWxbimwSkdnYw1p7
+K5dQv8CxjyAWsI7DrsQQ4hma3CoC41B/V5+6AIhpp20ttDAY0LKilXwPD1mlxZ9W
+ZZ/uu3LsfTLL4cliNqw35/J3oAJuKrrOkmF9zT2vAoGAVPEcwsk4Cp5fWsi41swj
+AntZjG9fS9aumzIKK2h0IKThVWd32bZu0n+FAD62hXxdVw0v5c2Nm3Xdbk0ffXm9
+ipDORQNOVbyPUt/zJhxJul42XcCNUUU3YVWfTUq2uZrm6xRle76USDUxr5irM2KG
+GYmCRTInGyM097Azcf+ZeZ8CgYBV+/dCPYpfus0u+ftZiDxg2pIPNOd8CnO7NYLQ
+I0CF6PWjI0ZKHNGkxkULT+rSNfB8K7ZF2OHbgBc7MgVm/ziNze0HH6wOdwrdW0jW
+tKOVe+XTqXh+RLo4xcztZcQ/W0gnSc4UQFHa7P1XdBDnJ7Jtbdj3GINBs5f8eg0V
+5SXTPQKBgDSGFk5Z/g5vAFtfpXPuDzdrjbc7i6by2SNStDsPSOl4mhVgHQidGc4R
+g5AH8G39QX+0WUhRhq4BzIt8G3KYNRiAz0W8wb8XUHTH787YnZ7m5heNeGAj9Ikb
+J49OI3+VhXQT+sW1mtLYQiijanLhTc2JJfHkBtI3/a6VmqZaNKla
+-----END RSA PRIVATE KEY-----
+)KEY";
